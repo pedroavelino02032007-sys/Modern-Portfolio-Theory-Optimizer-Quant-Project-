@@ -1,0 +1,183 @@
+import datetime as dt
+import yfinance as yf
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+#tickers
+stocks = ['AMZN', 'AAPL', 'MSFT','GOOG', 'JNJ', 'JPM']
+
+#date
+years = 5
+end = dt.datetime.now()
+start = end - dt.timedelta(days=365 * years)
+
+#stocks data + monte carlo
+close = yf.download(stocks, start=start, end=end)['Close']
+returns = np.log(close / close.shift(1)).dropna()
+
+mean_returns = returns.mean() * 252
+cov_matrix = returns.cov() * 252
+
+risk_free_rate = 0.04
+n_portfolios = 50000
+n_stocks = len(close.columns)
+
+def portfolio_returns(weights):
+    return weights @ mean_returns
+
+def portfolio_std(weights):
+    return np.sqrt(weights @ cov_matrix @ weights)
+
+def sharpe_ratio(weights):
+    return (portfolio_returns(weights) - risk_free_rate) / portfolio_std(weights)
+
+np.random.seed(42)
+
+results = np.zeros((3, n_portfolios))
+
+for i in range(n_portfolios):
+    weights = np.random.random(n_stocks)
+    weights /= weights.sum()
+
+    results[0, i] = portfolio_std(weights)
+    results[1, i] = portfolio_returns(weights)
+    results[2, i] = sharpe_ratio(weights)
+
+
+#finding optimal optimal weight
+initial_weights = np.ones(n_stocks) / n_stocks
+
+bounds = [(0, 1)] * n_stocks
+constraints = {
+    'type': 'eq',
+    'fun': lambda w: np.sum(w) - 1
+}
+
+max_sharpe = minimize(
+    lambda w: -sharpe_ratio(w),
+    initial_weights,
+    method='SLSQP',
+    bounds=bounds,
+    constraints=constraints
+)
+
+min_variance = minimize(
+    portfolio_std,
+    initial_weights,
+    method='SLSQP',
+    bounds=bounds,
+    constraints=constraints
+)
+
+if not max_sharpe.success or not min_variance.success:
+    raise RuntimeError("Portfolio optimization failed")
+
+optimal_weights = max_sharpe.x
+min_weights = min_variance.x
+
+target_returns = np.linspace(
+    portfolio_returns(min_weights),
+    mean_returns.max(),
+    100
+)
+
+#calculating efficient frontier
+frontier_volatility = []
+frontier_returns = []
+
+for target in target_returns:
+    target_constraint = [
+        constraints,
+        {
+            'type': 'eq',
+            'fun': lambda w, target=target:
+                portfolio_returns(w) - target
+        }
+    ]
+
+    result = minimize(
+        portfolio_std,
+        initial_weights,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=target_constraint
+    )
+
+    if result.success:
+        frontier_volatility.append(result.fun)
+        frontier_returns.append(target)
+
+#ploting results
+plt.figure(figsize=(12, 7))
+
+plt.scatter(
+    results[0],
+    results[1],
+    c=results[2],
+    cmap='viridis',
+    s=5,
+    alpha=0.5
+)
+
+plt.colorbar(label='Sharpe Ratio')
+
+plt.plot(
+    frontier_volatility,
+    frontier_returns,
+    'r-',
+    linewidth=2.5,
+    label='Efficient Frontier',
+    color='red'
+)
+
+plt.scatter(
+    portfolio_std(min_weights),
+    portfolio_returns(min_weights),
+    marker='*',
+    color='black',
+    s=250,
+    edgecolors='black',
+    label='Minimum Variance'
+)
+
+plt.scatter(
+    portfolio_std(optimal_weights),
+    portfolio_returns(optimal_weights),
+    marker='*',
+    color='red',
+    s=250,
+    edgecolors='black',
+    label='Maximum Sharpe'
+)
+
+x = np.linspace(0, results[0].max(), 100)
+y = risk_free_rate + sharpe_ratio(optimal_weights) * x
+
+plt.plot(x, y, 'k--', label='Capital Allocation Line')
+
+for stock in close.columns:
+    stock_return = mean_returns[stock]
+    stock_vol = np.sqrt(cov_matrix.loc[stock, stock])
+
+    plt.scatter(stock_vol, stock_return,
+                marker='D', color='red',
+                edgecolors='red', s=25)
+
+    plt.annotate(stock, (stock_vol, stock_return),
+                 xytext=(5, 5), textcoords='offset points')
+
+plt.xlabel('Annual Volatility (Risk)')
+plt.ylabel('Annual Expected Return')
+plt.title('Efficient Frontier : 50 000 random portfolios')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+#print statements
+print(f"Maximum Sharpe Ratio: {sharpe_ratio(optimal_weights):.3f}")
+print(f"Expected Annual Return: {portfolio_returns(optimal_weights):.2%}")
+print(f"Annual Volatility: {portfolio_std(optimal_weights):.2%}")
+
+print("\nOptimal Weights:")
+for stock, weight in zip(close.columns, optimal_weights):
+    print(f"{stock}: {weight:.2%}")
