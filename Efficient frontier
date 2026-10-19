@@ -1,28 +1,41 @@
 import datetime as dt
 import yfinance as yf
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+import plotly.graph_objects as go
 
-#tickers
-stocks = ['AMZN', 'AAPL', 'MSFT','GOOG', 'JNJ', 'JPM']
+# Tickers and date
+stocks = []
 
-#date
+while True:
+    stock = input('Enter ticker symbol ("quit" to exit loop): ').upper()
+
+    if stock == 'QUIT':
+        break
+    elif stock in stocks:
+        print("Stock already exists")
+    else:
+        stocks.append(stock)
+
+print("Your stocks:", stocks)
+
 years = 5
+risk_free_rate = 0.04
+n_portfolios = 10000
+
 end = dt.datetime.now()
 start = end - dt.timedelta(days=365 * years)
+close = yf.download(stocks,start=start,end=end,auto_adjust=True)['Close']
 
-#stocks data + monte carlo
-close = yf.download(stocks, start=start, end=end)['Close']
-returns = np.log(close / close.shift(1)).dropna()
+# Daily returns and statistics
+returns = close.pct_change().dropna()
 
 mean_returns = returns.mean() * 252
 cov_matrix = returns.cov() * 252
 
-risk_free_rate = 0.04
-n_portfolios = 50000
 n_stocks = len(close.columns)
 
+# Portfolio functions
 def portfolio_returns(weights):
     return weights @ mean_returns
 
@@ -32,20 +45,25 @@ def portfolio_std(weights):
 def sharpe_ratio(weights):
     return (portfolio_returns(weights) - risk_free_rate) / portfolio_std(weights)
 
+
+# Monte Carlo simulation
 np.random.seed(42)
 
 results = np.zeros((3, n_portfolios))
+all_weights = np.zeros((n_portfolios, n_stocks))
 
 for i in range(n_portfolios):
     weights = np.random.random(n_stocks)
     weights /= weights.sum()
+
+    all_weights[i] = weights
 
     results[0, i] = portfolio_std(weights)
     results[1, i] = portfolio_returns(weights)
     results[2, i] = sharpe_ratio(weights)
 
 
-#finding optimal optimal weight
+# Portfolio optimization ()
 initial_weights = np.ones(n_stocks) / n_stocks
 
 bounds = [(0, 1)] * n_stocks
@@ -76,15 +94,18 @@ if not max_sharpe.success or not min_variance.success:
 optimal_weights = max_sharpe.x
 min_weights = min_variance.x
 
+
+# Efficient frontier
 target_returns = np.linspace(
     portfolio_returns(min_weights),
     mean_returns.max(),
     100
 )
 
-#calculating efficient frontier
 frontier_volatility = []
 frontier_returns = []
+
+starting_weights = min_weights.copy()
 
 for target in target_returns:
     target_constraint = [
@@ -98,82 +119,20 @@ for target in target_returns:
 
     result = minimize(
         portfolio_std,
-        initial_weights,
+        starting_weights,
         method='SLSQP',
         bounds=bounds,
-        constraints=target_constraint
+        constraints=target_constraint,
+        options={'ftol': 1e-10, 'maxiter': 1000}
     )
 
     if result.success:
         frontier_volatility.append(result.fun)
         frontier_returns.append(target)
+        starting_weights = result.x
 
-#ploting results
-plt.figure(figsize=(12, 7))
 
-plt.scatter(
-    results[0],
-    results[1],
-    c=results[2],
-    cmap='viridis',
-    s=5,
-    alpha=0.5
-)
-
-plt.colorbar(label='Sharpe Ratio')
-
-plt.plot(
-    frontier_volatility,
-    frontier_returns,
-    'r-',
-    linewidth=2.5,
-    label='Efficient Frontier',
-    color='red'
-)
-
-plt.scatter(
-    portfolio_std(min_weights),
-    portfolio_returns(min_weights),
-    marker='*',
-    color='black',
-    s=250,
-    edgecolors='black',
-    label='Minimum Variance'
-)
-
-plt.scatter(
-    portfolio_std(optimal_weights),
-    portfolio_returns(optimal_weights),
-    marker='*',
-    color='red',
-    s=250,
-    edgecolors='black',
-    label='Maximum Sharpe'
-)
-
-x = np.linspace(0, results[0].max(), 100)
-y = risk_free_rate + sharpe_ratio(optimal_weights) * x
-
-plt.plot(x, y, 'k--', label='Capital Allocation Line')
-
-for stock in close.columns:
-    stock_return = mean_returns[stock]
-    stock_vol = np.sqrt(cov_matrix.loc[stock, stock])
-
-    plt.scatter(stock_vol, stock_return,
-                marker='D', color='red',
-                edgecolors='red', s=25)
-
-    plt.annotate(stock, (stock_vol, stock_return),
-                 xytext=(5, 5), textcoords='offset points')
-
-plt.xlabel('Annual Volatility (Risk)')
-plt.ylabel('Annual Expected Return')
-plt.title('Efficient Frontier : 50 000 random portfolios')
-plt.legend()
-plt.grid(alpha=0.3)
-plt.show()
-#print statements
+# Print optimal portfolio
 print(f"Maximum Sharpe Ratio: {sharpe_ratio(optimal_weights):.3f}")
 print(f"Expected Annual Return: {portfolio_returns(optimal_weights):.2%}")
 print(f"Annual Volatility: {portfolio_std(optimal_weights):.2%}")
@@ -181,3 +140,142 @@ print(f"Annual Volatility: {portfolio_std(optimal_weights):.2%}")
 print("\nOptimal Weights:")
 for stock, weight in zip(close.columns, optimal_weights):
     print(f"{stock}: {weight:.2%}")
+
+
+# visualization
+fig = go.Figure()
+
+# hover
+hover = '<b>Portfolio Allocation</b><br><br>'
+
+for i, stock in enumerate(close.columns, start=1):
+    hover += f'{stock}: %{{customdata[{i}]:.1%}}<br>'
+
+hover += (
+    '<br>Expected Return: %{y:.2%}<br>'
+    'Volatility: %{x:.2%}<br>'
+    'Sharpe Ratio: %{customdata[0]:.3f}'
+    '<extra></extra>'
+)
+
+# MonteCarlo dots
+fig.add_trace(go.Scattergl(
+    x=results[0],
+    y=results[1],
+    mode='markers',
+    name='Random Portfolios',
+    marker=dict(
+        size=4,
+        color=results[2],
+        colorscale='Viridis',
+        opacity=0.6,
+        colorbar=dict(title='Sharpe Ratio')
+    ),
+    customdata=np.column_stack((results[2], all_weights)),
+    hovertemplate=hover
+))
+
+# Efficient frontier line
+fig.add_trace(go.Scatter(
+    x=frontier_volatility,
+    y=frontier_returns,
+    mode='lines',
+    name='Efficient Frontier',
+    line=dict(color='red', width=4)
+))
+
+# max SHARPE and MIN variance
+optimized = [
+    ('Maximum Sharpe', optimal_weights, 'gold'),
+    ('Minimum Variance', min_weights, 'royalblue')
+]
+
+for name, w, color in optimized:
+    allocation = '<br>'.join(
+        f'{stock}: {weight:.1%}'
+        for stock, weight in zip(close.columns, w)
+    )
+
+    fig.add_trace(go.Scatter(
+        x=[portfolio_std(w)],
+        y=[portfolio_returns(w)],
+        mode='markers',
+        name=name,
+        marker=dict(
+            symbol='star',
+            size=22,
+            color=color,
+            line=dict(color='black', width=1.5)
+        ),
+        hovertemplate=(
+            f'<b>{name}</b><br>'
+            'Volatility: %{x:.2%}<br>'
+            'Expected Return: %{y:.2%}<br>'
+            f'Sharpe Ratio: {sharpe_ratio(w):.3f}<br>'
+            f'<br><b>Weights</b><br>{allocation}'
+            '<extra></extra>'
+        )
+    ))
+
+# Capital Allocation Line
+x = np.linspace(
+    0,
+    max(results[0].max(), max(frontier_volatility)),
+    100
+)
+
+y = risk_free_rate + sharpe_ratio(optimal_weights) * x
+
+fig.add_trace(go.Scatter(
+    x=x,
+    y=y,
+    mode='lines',
+    name='Capital Allocation Line',
+    line=dict(color='black', dash='dash', width=2)
+))
+
+# stocks
+for stock in close.columns:
+    stock_return = mean_returns[stock]
+    stock_vol = np.sqrt(cov_matrix.loc[stock, stock])
+
+    fig.add_trace(go.Scatter(
+        x=[stock_vol],
+        y=[stock_return],
+        mode='markers+text',
+        name=stock,
+        text=[stock],
+        textposition='top right',
+        marker=dict(
+            symbol='diamond',
+            size=11,
+            color='white',
+            line=dict(color='red', width=2)
+        ),
+        hovertemplate=(
+            f'<b>{stock}</b><br>'
+            'Volatility: %{x:.2%}<br>'
+            'Expected Return: %{y:.2%}'
+            '<extra></extra>'
+        )
+    ))
+
+# Graph layout
+fig.update_layout(
+    title=f'Interactive Efficient Frontier | {n_portfolios:,} Portfolios',
+    xaxis_title='Annual Volatility (Risk)',
+    yaxis_title='Annual Expected Return',
+    xaxis_tickformat='.0%',
+    yaxis_tickformat='.0%',
+    template='plotly_white',
+    width=1200,
+    height=750,
+    hovermode='closest',
+    legend=dict(
+        x=0.01,
+        y=0.99,
+        bgcolor='rgba(255,255,255,0.8)'
+    )
+)
+
+fig.show()
